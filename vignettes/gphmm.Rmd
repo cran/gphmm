@@ -1,0 +1,244 @@
+---
+title: "gphmm package"
+author: "Fanny Perraudeau, Jim Bullard"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteEngine{knitr::knitr}
+  %\VignetteIndexEntry{gphmm}
+  %\usepackage[UTF-8]{inputenc}
+---
+
+```{r options, echo=FALSE, results="hide",message=FALSE, error=FALSE, include=FALSE, autodep=TRUE}
+knitr::opts_chunk$set(fig.align="center", cache=FALSE, error=FALSE, message=FALSE, warning=FALSE)
+library(gphmm)
+library(Biostrings)
+library(jsonlite)
+```
+
+The gphmm package implements the generalized pair hidden Markov chain model (GPHMM).
+
+#1. Commandline tool
+
+```{bash}
+../inst/gphmm --help
+```
+
+There are two ways to use the command line tool. You can compute the GPHMM probabilities using a set of parameters or train the model to estimate the parameters using noisy reads and the non noisy version of the sequences.
+
+
+The main inputs of the commandline tool are  
+
+* a fasta file with the DNA sequences for all the sequences you want to compute the GPHMM probabilities for,  
+* a csv file with at least two columns
+    - a first column with the name of the queries,  
+    - a second column with the name of the reference sequences,
+    - optionally, a third column with the quality values of the queries. If not specified, a quality value of 20 is used by default.  
+  
+The name of the queries and reference sequences in the csv file should have a sequence with the same name in the fasta file. Then, for each row in the csv file, the GPHMM probability is computed for the corresponding query and reference sequence.
+
+#2. Compute GPHMM probabilities
+## Set parameters
+To compute the GPHMM probabilities, we need to have access to a set of parameters for the model. GPHMM parameters need to be estimated using a training set where the queries have been sequenced from known reference sequences (see next section). For the moment, let's use function `initializeGphmm` to get the set of GPHMM parameters used as initial parameters during the training phase
+```{r}
+paramgphmm = initializeGphmm()
+paramgphmm
+```
+
+## Use R functions
+Let's compute the GPHMM probability (log scale) for the two following sequences   
+
+Query  
+```{r}
+read = 'ATGCGATGCA'
+read
+```
+
+Reference sequence
+```{r}
+ref = 'ATGTACGATGA'
+ref
+```
+
+GPHMM probability
+```{r}
+computegphmm(read = read,
+             ref = ref,
+             parameters = paramgphmm,
+             output = "short")
+```
+
+You can also look a more detailed output where the path (i.e., the sequence of hidden states) is specified. Hidden states can take the following values:  
+
+- `M` means Match or Mismatch state,
+- `I` means Insertion state,
+- `D` means Deletion state.
+
+```{r}
+computegphmm(read = read,
+             ref =  ref,
+             qv = 20,
+             parameters = paramgphmm,
+             output = "long")
+```
+
+
+## Use commandline
+```{r}
+n = 100
+```
+
+Let's randomly generate `r n` sequences
+```{r}
+seqs = generateRandomSequences(n = n, meanLen = 100, sdLen = 2,
+                               seed = 7373)
+writeXStringSet(seqs, 'queries.fasta')
+seqs
+```
+
+We are going to compute GPHMM for all pairs of sequences. We did not include a column for the quality values, so a default quality value of 20 is used.
+```{r}
+toCompute = data.frame(query = rep(paste0('s', 1:n), n),
+                       ref = rep(paste0('s', 1:n), each = n))
+write.table(toCompute, 'toCompute.csv')
+head(toCompute)
+```
+
+So, there are `r nrow(toCompute)` GPHMM probabilities to compute. Let's call the commandline tool `gphmm compute`
+```{bash}
+../inst/gphmm compute queries.fasta toCompute.csv --verbose --ncores=1
+```
+
+The output file is the same as the input csv file, but a column has been added with the estimated (log) GPHMM probabilities 
+```{r}
+out = read.table('toCompute_gphmm.csv', stringsAsFactors = F)
+head(out)
+```
+
+
+# 3.Train
+
+The GPHMM is a generative model, therefore noisy reads can be generated from true reference sequences, a GPHMM model, and a set of chosen emission and transition probabilities. Parameters are then estimated using our training algorithm. Note that in real life true emission and transition probabilities are unknown. Then, GPHMM parameters need to be estimated from a training set generated in the lab where noisy reads have been sequenced from known reference sequences.
+
+## Generate training set
+```{r}
+n = 50
+```
+
+Our generative model has the following variables
+```{r}
+paramgphmm = initializeGphmm()
+paramgphmm
+```
+
+`r n` true reference sequences are randomly generated from our GPHMM model. More sequences would be needed to estimate unbiased parameters, but for this vignette we use a small number of sequences to reduce the computation time.
+```{r}
+seqs = generateRandomSequences(n = n, meanLen = 100, sdLen = 5,
+                               prob = paramgphmm$qR, seed = 7373)
+seqs
+```
+
+Let's now similate sequencing errors in the true reference sequences using our model and true emission and transition probabilities
+```{r}
+qv = rnorm(n, 20, 5)
+qv[qv < 5] = 5
+reads = list()
+for (i in 1:n){
+  reads[[i]] = generateRead(seq = as.character(seqs[i]), 
+                            paramgphmm = paramgphmm,
+                            qv = qv[i],
+                            seed = i)
+}
+train = c(seqs, DNAStringSet(sapply(reads, '[[', 1)))
+names(train) = c(names(train)[1:n], gsub('s', 't', names(train)[1:n]))
+csv = data.frame(reads = paste0('t', 1:n), ref = paste0('s', 1:n), qv = qv)
+
+# write files
+writeXStringSet(train, 'train.fasta')
+write.table(csv, 'train.csv')
+```
+
+
+```{r}
+plot(density(qv), main = 'Read QV (Phred)')
+```
+
+```{r}
+plot(density(width(seqs)), main = 'Sequence length')
+```
+
+```{r}
+plot(density(width(train[grepl('t', names(train))])), main = 'Read length')
+```
+
+The true counts for the emission and transition matrices are
+```{r}
+emiTrans = lapply(reads, function(x) computeCounts(x)) 
+emiTrans = lapply(lapply(c(1:4), function(i) lapply(emiTrans, '[[', i)), function(x) Reduce('+', x))
+names(emiTrans) = c('counts_emissionM', 'counts_emissionD',
+                    'counts_emissionI', 'counts_transition')
+emiTrans
+```
+
+## Use commandline
+
+Commandline `gphmm train` can be used to estimate the parameters of the model
+
+```{bash}
+../inst/gphmm train train.fasta train.csv --verbose --maxit=5 --ncores=1
+```
+
+## Evaluate performances
+
+The estimated parameters are
+```{r}
+nucl = c('A', 'C', 'G', 'T')
+estimator = fromJSON('train_paramgphmm.json')
+names(estimator[['qR']]) = names(estimator[['qX']]) = names(estimator[['qY']]) = 
+  colnames(estimator[['pp']]) = rownames(estimator[['pp']]) = nucl
+names(estimator[['deltaX']]) = names(estimator[['deltaY']]) = 
+  c('intercept', 'slope')
+estimator
+```
+
+The log likelihood increases at each iteration of the training procedure. You should see a plateau at the end of the training procedure
+```{r}
+ll = fromJSON('train_llgphmm.json')
+plot(1:length(ll), ll, xlab = 'Iterations', ylab = 'Log Likelihood',
+     type = 'l', main = 'Log likelihood')
+```
+
+As parameters were estimated from a set of known emission and transition probabilities, the performance of our training procedure can be assessed using the bias (estimated - true) probabilities
+```{r}
+bias = unlist(mapply('-', estimator, paramgphmm, SIMPLIFY = FALSE))
+ppNames = paste0('pp.', paste0(rep(nucl, each = 4), rep(nucl, 4)))
+names(bias)[grep('^pp', names(bias))] = ppNames
+```
+
+```{r}
+emission = grepl('A|C|G|T', names(bias))
+plot(bias[emission], xaxt = "n", main = 'Emission parameters',
+     xlab = '', ylab = 'Bias')
+axis(1, at = 1:length(bias[emission]), las = 2, labels = names(bias[emission]))
+abline(h = 0)
+```
+
+```{r}
+transition = !emission
+plot(bias[transition], xaxt = "n", main = 'Transition parameters',
+     xlab = '', ylab = 'Bias')
+axis(1, at = 1:length(bias[transition]), las = 2, labels = names(bias[transition]))
+abline(h = 0)
+```
+
+
+```{r}
+# remove generated files
+system('rm queries.fasta')
+system('rm toCompute_gphmm.csv')
+system('rm toCompute.csv')
+system('rm train.csv')
+system('rm train.fasta')
+system('rm train_paramgphmm.json')
+system('rm train_llgphmm.json')
+```

@@ -1,0 +1,16 @@
+##
+## export anything w/out a . in front
+##
+useDynLib(gphmm)
+exportPattern("^[^\\.]")
+
+import(Rcpp)
+import(docopt)
+importFrom(Biostrings, DNAStringSet, width)
+importFrom(parallel, mclapply)
+importFrom(dplyr, "%>%",group_by,summarize,ungroup,filter,mutate,n)
+importFrom(stringr, str_replace_all)
+importFrom(stringi, stri_count_fixed)
+importFrom(stats, binomial, coefficients, glm, rnorm)
+
+
